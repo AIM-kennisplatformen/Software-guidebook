@@ -1,0 +1,36 @@
+# .github/workflows/notify-docs.yml
+#
+# Place this file in every SOURCE repository you want to watch.
+# When a PR is merged it dispatches an event to the docs repository.
+#
+# Required secret in the SOURCE repo:
+#   DOCS_REPO_PAT  – PAT with `repo` scope on the DOCS repository
+#
+# Required variable in the SOURCE repo (or hardcode below):
+#   DOCS_REPO      – e.g. "my-org/my-docs-repo"
+
+name: Notify Docs Repo on Merge
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  notify:
+    if: github.event.pull_request.merged == true
+    name: Dispatch to docs repo
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send repository_dispatch to docs repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token:       ${{ secrets.DOCS_REPO_PAT }}
+          repository:  ${{ vars.DOCS_REPO }}
+          event-type:  pr_merged
+          client-payload: |
+            {
+              "source_repo": "${{ github.repository }}",
+              "source_pr":   ${{ github.event.pull_request.number }},
+              "docs_branch": "docs"
+            }

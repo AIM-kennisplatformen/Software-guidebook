@@ -1,0 +1,92 @@
+# .github/workflows/auto-docs-generate.yml
+#
+# Triggered when a PR is merged in a WATCHED (source) repository.
+# The source repo calls this workflow via repository_dispatch or
+# workflow_dispatch. See docs/setup.md for wiring instructions.
+#
+# Required secrets (set in the DOCS repo settings):
+#   GITHUB_PAT       – classic PAT with repo + pull_request scopes
+#   ANTHROPIC_API_KEY – Claude API key
+
+name: Auto-generate Documentation
+
+on:
+  # Fired by watched repos via their own "notify-docs" workflow
+  repository_dispatch:
+    types: [pr_merged]
+
+  # Manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Source repo (owner/repo)"
+        required: true
+      source_pr:
+        description: "Merged PR number"
+        required: true
+      docs_branch:
+        description: "Target docs branch"
+        default: "docs"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  generate:
+    name: Generate & Open Docs PR
+    runs-on: ubuntu-latest
+    outputs:
+      doc_pr_url: ${{ steps.generate.outputs.doc_pr_url }}
+
+    steps:
+      - name: Checkout docs repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.docs_branch || 'docs' }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install openai requests
+
+      - name: Determine inputs
+        id: inputs
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "source_repo=${{ github.event.client_payload.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_pr=${{ github.event.client_payload.source_pr }}"     >> "$GITHUB_OUTPUT"
+            echo "docs_branch=${{ github.event.client_payload.docs_branch || 'docs' }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "source_repo=${{ github.event.inputs.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_pr=${{ github.event.inputs.source_pr }}"     >> "$GITHUB_OUTPUT"
+            echo "docs_branch=${{ github.event.inputs.docs_branch }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate documentation and open PR
+        id: generate
+        env:
+          GITHUB_PAT:         ${{ secrets.GITHUB_PAT }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          url=$(python generate_docs.py \
+            --source-repo "${{ steps.inputs.outputs.source_repo }}" \
+            --source-pr   "${{ steps.inputs.outputs.source_pr }}" \
+            --docs-repo   "${{ github.repository }}" \
+            --docs-branch "${{ steps.inputs.outputs.docs_branch }}")
+          echo "doc_pr_url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Upload PR metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: doc-pr-meta
+          path: doc_pr_meta.json
+          retention-days: 7
+
+      - name: Summary
+        run: |
+          echo "### 📚 Documentation PR created" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.generate.outputs.doc_pr_url }}" >> "$GITHUB_STEP_SUMMARY"

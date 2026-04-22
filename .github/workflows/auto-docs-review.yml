@@ -1,0 +1,116 @@
+# .github/workflows/auto-docs-review.yml
+#
+# Triggered whenever a review or review comment is submitted on any PR
+# in the DOCS repository. Processes /docs-update commands and merges
+# the PR when approved.
+#
+# Required secrets:
+#   GITHUB_PAT        – same PAT as generate workflow
+#   ANTHROPIC_API_KEY – Claude API key
+
+name: Process Documentation Review
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+  pull_request_review_comment:
+    types: [created]
+
+  # Allow manual re-runs if the bot missed a comment
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Documentation PR number to re-process"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  process:
+    name: Process Comments & Maybe Merge
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout docs repo (docs branch)
+        uses: actions/checkout@v4
+        with:
+          ref: docs
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install openai requests
+
+      - name: Download PR metadata artifact
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: doc-pr-meta
+          # Search across all workflow runs in this repo
+          search_artifacts: true
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      # Fallback: if no artifact found, build meta from PR context
+      - name: Build meta from PR context (fallback)
+        if: ${{ !hashFiles('doc_pr_meta.json') }}
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+        run: |
+          PR="${{ github.event.pull_request.number || github.event.inputs.pr_number }}"
+          python - <<'EOF'
+          import json, os, sys
+          from github_client import GitHubClient
+
+          gh = GitHubClient(os.environ["GITHUB_PAT"])
+          repo = os.environ["GITHUB_REPOSITORY"]
+          pr_number = int(os.environ.get("PR_NUMBER", 0))
+
+          pr = gh.get_pr(repo, pr_number)
+          head_branch = pr["head"]["ref"]
+
+          # Try to parse source info from PR body
+          import re
+          body = pr.get("body", "")
+          m = re.search(r"https://github.com/([^/]+/[^/]+)/pull/(\d+)", body)
+          source_repo = m.group(1) if m else "unknown/unknown"
+          source_pr   = int(m.group(2)) if m else 0
+
+          # List changed files to infer generated_docs
+          files = gh.get_pr_files(repo, pr_number)
+          generated = [f["filename"] for f in files]
+
+          meta = {
+              "source_repo": source_repo,
+              "source_pr": source_pr,
+              "merger": pr["user"]["login"],
+              "docs_repo": repo,
+              "doc_branch": head_branch,
+              "docs_branch": "docs",
+              "doc_pr_number": pr_number,
+              "generated_docs": generated,
+          }
+          with open("doc_pr_meta.json", "w") as f:
+              json.dump(meta, f, indent=2)
+          print("Built fallback metadata:", meta)
+          EOF
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+
+      - name: Process review comments
+        env:
+          GITHUB_PAT:         ${{ secrets.GITHUB_PAT }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python process_comments.py --meta-file doc_pr_meta.json
+
+      - name: Summary
+        run: |
+          echo "### 🤖 Review processing complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "PR metadata:" >> "$GITHUB_STEP_SUMMARY"
+          cat doc_pr_meta.json >> "$GITHUB_STEP_SUMMARY"
