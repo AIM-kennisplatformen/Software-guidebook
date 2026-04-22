@@ -22,7 +22,7 @@ from openai import OpenAI
 
 from doc_builder import apply_comment_revision
 from github_client import GitHubClient
-from skills_loader import load_skills
+from skills_loader import load_skills, SkillsBundle
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

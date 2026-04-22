@@ -75,7 +75,7 @@ jobs:
           url=$(python generate_docs.py \
             --source-repo "${{ steps.inputs.outputs.source_repo }}" \
             --source-pr   "${{ steps.inputs.outputs.source_pr }}" \
-            --docs-repo   "${{ github.repository }}" \
+            --docs-repo   "AIM-kennisplatformen/Software-guidebook" \
             --docs-branch "${{ steps.inputs.outputs.docs_branch }}")
           echo "doc_pr_url=$url" >> "$GITHUB_OUTPUT"
 
