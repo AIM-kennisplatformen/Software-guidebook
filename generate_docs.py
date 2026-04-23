@@ -126,9 +126,31 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 4. Generate / update guidebook sections
+    # 4a. Generate / update guidebook sections
     # ------------------------------------------------------------------
     log.info("Generating Software Guidebook sections (14 sections)…")
+    # ------------------------------------------------------------------
+    # 4b. If no guidebook exists yet — fetch the full codebase snapshot
+    # ------------------------------------------------------------------
+    codebase_snapshot: dict[str, str] = {}
+    if is_new_guidebook:
+        log.info(
+            "No existing guidebook found — fetching full codebase snapshot from %s@%s",
+            args.source_repo, commit_sha[:8],
+        )
+        codebase_snapshot = gh.get_codebase_snapshot(
+            repo=args.source_repo,
+            ref=commit_sha,
+        )
+        log.info(
+            "Codebase snapshot ready: %d files fetched",
+            len(codebase_snapshot),
+        )
+    else:
+        log.info(
+            "Existing guidebook found — using PR diff only for targeted updates"
+        )
+
     generated_docs = build_docs(
         claude=claude,
         pr_title=pr_title,
@@ -139,6 +161,7 @@ def main() -> None:
         existing_docs=existing_docs,
         repo_name=args.source_repo,
         commit_sha=commit_sha,
+        codebase_snapshot=codebase_snapshot,
     )
 
     if not generated_docs:
@@ -149,9 +172,7 @@ def main() -> None:
     log.info("Sections to write: %d", len(generated_docs))
 
     if args.dry_run:
-        for path, content in generated_docs.items():
-            print(f"\n{'='*60}\n📄 {path}\n{'='*60}\n{content[:600]}…")
-        log.info("[DRY RUN] No PR created.")
+        _write_dry_run_output(generated_docs, args.source_repo, args.source_pr)
         return
 
     # ------------------------------------------------------------------
@@ -313,6 +334,42 @@ def _require_env(name: str) -> str:
         log.error("Required environment variable %s is not set.", name)
         sys.exit(1)
     return val
+
+
+def _write_dry_run_output(
+    generated_docs: dict[str, str],
+    source_repo: str,
+    source_pr: int,
+) -> None:
+    """Write generated guidebook sections to dry-run-output/ for local inspection."""
+    import shutil
+    output_root = Path("dry-run-output")
+
+    # Clear any previous dry-run output so results are always fresh
+    if output_root.exists():
+        shutil.rmtree(output_root)
+
+    for doc_path, content in generated_docs.items():
+        dest = output_root / doc_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        log.info("[DRY RUN] Written: %s (%d chars)", dest, len(content))
+
+    # Write a manifest so you know exactly what would have been committed
+    manifest_lines = [
+        f"# Dry-run output",
+        f"# Source: {source_repo}#{source_pr}",
+        f"# {len(generated_docs)} section(s) would be committed",
+        "",
+    ]
+    for doc_path in generated_docs:
+        manifest_lines.append(f"- {doc_path}")
+    (output_root / "MANIFEST.txt").write_text("\n".join(manifest_lines))
+
+    abs_path = output_root.resolve()
+    log.info("[DRY RUN] All sections written to: %s", abs_path)
+    log.info("[DRY RUN] No branch, commit, or PR was created.")
+    print(str(abs_path))
 
 
 if __name__ == "__main__":

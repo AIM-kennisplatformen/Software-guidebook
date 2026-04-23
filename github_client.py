@@ -164,6 +164,135 @@ class GitHubClient:
                 return []
             raise
 
+
+    # ------------------------------------------------------------------
+    # Full codebase snapshot (for first-time guidebook creation)
+    # ------------------------------------------------------------------
+
+    # Extensions we consider readable source files worth sending to Claude
+    SOURCE_EXTENSIONS = {
+        ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".go",
+        ".rs", ".rb", ".php", ".cs", ".cpp", ".c", ".h", ".swift",
+        ".vue", ".svelte", ".html", ".css", ".scss", ".sass",
+        ".json", ".yaml", ".yml", ".toml", ".ini", ".env.example",
+        ".sql", ".graphql", ".proto",
+        ".md", ".txt", ".rst",
+        "Dockerfile", "docker-compose.yml", "Makefile",
+    }
+
+    # Directories to always ignore
+    IGNORE_DIRS = {
+        "node_modules", ".git", ".github", "dist", "build", "out",
+        "__pycache__", ".pytest_cache", ".mypy_cache", "coverage",
+        ".next", ".nuxt", ".svelte-kit", "vendor", "venv", ".venv",
+        "env", ".env", "target", "bin", "obj", ".idea", ".vscode",
+    }
+
+    def get_repo_tree(self, repo: str, ref: str = "HEAD") -> list[dict]:
+        """
+        Return the full recursive file tree for a repo at the given ref.
+        Each item: { path, type, size, url }
+        """
+        # Resolve ref to a SHA first
+        try:
+            sha_data = self._get(f"/repos/{repo}/git/ref/heads/{ref}")
+            sha = sha_data["object"]["sha"]
+        except Exception:
+            # ref might already be a SHA or a tag
+            sha = ref
+
+        tree_data = self._get(
+            f"/repos/{repo}/git/trees/{sha}",
+            params={"recursive": "1"},
+        )
+        return tree_data.get("tree", [])
+
+    def get_codebase_snapshot(
+        self,
+        repo: str,
+        ref: str = "HEAD",
+        max_file_size: int = 80_000,   # bytes — skip very large files
+        max_total_chars: int = 400_000, # keep total prompt size manageable
+    ) -> dict[str, str]:
+        """
+        Fetch readable source files from the repo and return a
+        { relative_path: file_content } mapping.
+
+        Files are prioritised in this order:
+          1. Config / manifest files (package.json, docker-compose, etc.)
+          2. Entrypoints and top-level source
+          3. Everything else, alphabetically
+
+        Stops when max_total_chars is reached so we never blow the context window.
+        """
+        tree = self.get_repo_tree(repo, ref)
+
+        # Filter to blobs only, skip ignored dirs and non-source files
+        candidates: list[dict] = []
+        for item in tree:
+            if item.get("type") != "blob":
+                continue
+            path: str = item["path"]
+            size: int = item.get("size", 0)
+
+            # Skip ignored directories
+            parts = path.split("/")
+            if any(p in self.IGNORE_DIRS for p in parts[:-1]):
+                continue
+
+            # Skip large files
+            if size > max_file_size:
+                log.debug("Skipping large file (%d bytes): %s", size, path)
+                continue
+
+            # Check extension or exact filename
+            fname = parts[-1]
+            ext = "." + fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+            if ext not in self.SOURCE_EXTENSIONS and fname not in self.SOURCE_EXTENSIONS:
+                continue
+
+            candidates.append({"path": path, "size": size, "url": item.get("url", "")})
+
+        # Prioritise important files first
+        def priority(item: dict) -> int:
+            p = item["path"].lower()
+            if any(x in p for x in ["package.json", "docker-compose", "dockerfile",
+                                      "makefile", "readme", "requirements.txt",
+                                      "pyproject.toml", "cargo.toml", "go.mod",
+                                      ".env.example", "openapi", "schema"]):
+                return 0
+            if p.count("/") <= 1:   # top-level files
+                return 1
+            return 2
+
+        candidates.sort(key=lambda x: (priority(x), x["path"]))
+
+        # Fetch content up to the total char limit
+        snapshot: dict[str, str] = {}
+        total_chars = 0
+
+        for item in candidates:
+            if total_chars >= max_total_chars:
+                log.info(
+                    "Reached max_total_chars (%d) — stopping codebase fetch (%d/%d files fetched)",
+                    max_total_chars, len(snapshot), len(candidates),
+                )
+                break
+            try:
+                file_data = self.get_file(repo, item["path"], ref=ref)
+                if file_data:
+                    content = file_data["decoded_content"]
+                    snapshot[item["path"]] = content
+                    total_chars += len(content)
+            except Exception as exc:
+                log.debug("Could not fetch %s: %s", item["path"], exc)
+
+        log.info(
+            "Codebase snapshot: %d files, ~%d chars total",
+            len(snapshot), total_chars,
+        )
+        return snapshot
+
     # ------------------------------------------------------------------
     # Diagnostics
     # ------------------------------------------------------------------
